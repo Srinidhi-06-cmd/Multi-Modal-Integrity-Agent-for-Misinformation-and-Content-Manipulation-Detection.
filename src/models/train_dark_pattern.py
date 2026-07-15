@@ -1,16 +1,29 @@
-# src/models/train_dark_pattern.py
-
 import os
 import pandas as pd
 import numpy as np
 import re
 import nltk
 import gensim
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 from nltk.corpus import stopwords
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
+from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
+import tensorflow as tf
+import random
+
+# -------------------------------
+# Reproducibility
+# -------------------------------
+SEED = 42
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+random.seed(SEED)
 
 # -------------------------------
 # Setup
@@ -30,7 +43,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 print("\nLoading Dataset...\n")
 
 df = pd.read_csv(DATA_PATH)
-df = df[["text", "label"]]
+df = df[["text", "label"]].dropna()
 
 print("Dataset Loaded:", df.shape)
 
@@ -49,22 +62,22 @@ df["clean_text"] = df["text"].apply(clean_text)
 # -------------------------------
 # Train Word2Vec
 # -------------------------------
-print("\nTraining Word2Vec model...\n")
+print("\nTraining Word2Vec...\n")
 
 w2v_model = gensim.models.Word2Vec(
     sentences=df["clean_text"].tolist(),
     vector_size=100,
     window=5,
     min_count=1,
-    workers=4
+    workers=4,
+    epochs=10,
+    seed=SEED
 )
 
 w2v_model.save(os.path.join(MODEL_DIR, "dark_pattern_w2v.model"))
 
-print("Word2Vec model saved successfully.")
-
 # -------------------------------
-# Convert Sentences to Vectors
+# Convert to vectors
 # -------------------------------
 def sentence_to_vec(sentence):
     vec = np.zeros(100)
@@ -82,15 +95,11 @@ y = df["label"].values
 # Train/Test Split
 # -------------------------------
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
+    X, y, test_size=0.2, random_state=SEED, stratify=y
 )
 
-print("\nData split complete.")
-print("Training samples:", X_train.shape[0])
-print("Testing samples:", X_test.shape[0])
-
 # -------------------------------
-# Build Feedforward Neural Network
+# Model
 # -------------------------------
 def build_model(input_shape, optimizer_name="adam"):
 
@@ -104,13 +113,11 @@ def build_model(input_shape, optimizer_name="adam"):
     ])
 
     if optimizer_name == "adam":
-        optimizer = Adam()
+        optimizer = Adam(learning_rate=0.001)
     elif optimizer_name == "sgd":
-        optimizer = SGD()
-    elif optimizer_name == "rmsprop":
-        optimizer = RMSprop()
+        optimizer = SGD(learning_rate=0.01, momentum=0.9)
     else:
-        optimizer = Adam()
+        optimizer = RMSprop(learning_rate=0.001)
 
     model.compile(
         optimizer=optimizer,
@@ -121,64 +128,74 @@ def build_model(input_shape, optimizer_name="adam"):
     return model
 
 # -------------------------------
-# Train With Multiple Optimizers
+# Early Stopping 🔥
+# -------------------------------
+early_stop = EarlyStopping(
+    monitor="val_loss",
+    patience=3,
+    restore_best_weights=True
+)
+
+# -------------------------------
+# Train Models
 # -------------------------------
 results = []
 
 for opt in ["adam", "sgd", "rmsprop"]:
 
-    print(f"\n==============================")
-    print(f"Training Dark Pattern NN with {opt.upper()} optimizer")
-    print(f"==============================\n")
+    print(f"\nTraining with {opt.upper()}...\n")
 
-    model = build_model(X_train.shape[1], optimizer_name=opt)
+    model = build_model(X_train.shape[1], opt)
+
+    # Save architecture
+    with open(os.path.join(MODEL_DIR, f"dark_pattern_model_summary_{opt}.txt"), "w", encoding="utf-8") as f:
+        model.summary(print_fn=lambda x: f.write(x + "\n"))
 
     history = model.fit(
         X_train,
         y_train,
         validation_data=(X_test, y_test),
-        epochs=10,
+        epochs=20,
         batch_size=32,
+        callbacks=[early_stop],
         verbose=1
     )
 
-    loss, acc = model.evaluate(X_test, y_test, verbose=0)
+    # Prediction
+    y_pred_prob = model.predict(X_test)
+    y_pred = (y_pred_prob > 0.5).astype(int)
 
-    print(f"\n{opt.upper()} Test Accuracy: {acc:.4f}")
+    acc = np.mean(y_pred.flatten() == y_test)
+
+    # Confusion matrix
+    cm = confusion_matrix(y_test, y_pred)
+
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title(f"{opt.upper()} Confusion Matrix")
+    plt.savefig(os.path.join(MODEL_DIR, f"dark_pattern_cm_{opt}.png"))
+    plt.close()
+
+    # Metrics
+    report = classification_report(y_test, y_pred, output_dict=True)
+    pd.DataFrame(report).transpose().to_csv(
+        os.path.join(MODEL_DIR, f"dark_pattern_metrics_{opt}.csv")
+    )
 
     # Save model
-    model_path = os.path.join(MODEL_DIR, f"dark_pattern_nn_{opt}.h5")
-    model.save(model_path)
-    print(f"Model saved at: {model_path}")
+    model.save(os.path.join(MODEL_DIR, f"dark_pattern_nn_{opt}.h5"))
 
-    # Store results for proof
     results.append({
         "optimizer": opt.upper(),
-        "best_train_accuracy": max(history.history["accuracy"]),
-        "best_validation_accuracy": max(history.history["val_accuracy"]),
-        "test_accuracy": acc
+        "accuracy": acc
     })
 
 # -------------------------------
-# Save Proof File
+# Save results
 # -------------------------------
-results_df = pd.DataFrame(results)
+pd.DataFrame(results).to_csv(
+    os.path.join(MODEL_DIR, "dark_pattern_training_results.csv"),
+    index=False
+)
 
-results_path = os.path.join(MODEL_DIR, "dark_pattern_training_results.csv")
-results_df.to_csv(results_path, index=False)
-
-print("\nTraining Results Saved At:", results_path)
-
-# -------------------------------
-# Show Summary
-# -------------------------------
-print("\nTraining Summary:")
-print(results_df)
-
-best_model = results_df.sort_values(by="test_accuracy", ascending=False).iloc[0]
-
-print("\nBest Optimizer Based on Test Accuracy:")
-print(f"{best_model['optimizer']} "
-      f"({best_model['test_accuracy']*100:.2f}% accuracy)")
-
-print("\nAll Dark Pattern models trained and saved successfully!\n")
+print("\n✅ Dark Pattern Training Completed!")

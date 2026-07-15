@@ -6,13 +6,20 @@ import numpy as np
 import pandas as pd
 import nltk
 import gensim
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 from nltk.corpus import stopwords
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix, roc_curve
+from sklearn.utils.class_weight import compute_class_weight
+
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras import regularizers
+
 import tensorflow as tf
 import random
 import pickle
@@ -93,12 +100,15 @@ print("Word2Vec model saved.")
 def sentence_to_vec(sentence, model, vector_size=100):
     vec = np.zeros(vector_size)
     count = 0
+
     for word in sentence:
         if word in model.wv:
             vec += model.wv[word]
             count += 1
+
     if count != 0:
         vec /= count
+
     return vec
 
 print("Converting text to vectors...")
@@ -119,25 +129,43 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 
 # ======================================================
-# Build Neural Network
+# Class Weights (🔥 IMPORTANT)
+# ======================================================
+class_weights = compute_class_weight(
+    class_weight="balanced",
+    classes=np.unique(y_train),
+    y=y_train
+)
+class_weights = dict(enumerate(class_weights))
+
+# ======================================================
+# Build Neural Network (🔥 IMPROVED)
 # ======================================================
 def build_model(input_dim, optimizer_name="adam"):
 
     model = Sequential([
         Input(shape=(input_dim,)),
-        Dense(128, activation="relu"),
+
+        Dense(128, activation="relu",
+              kernel_regularizer=regularizers.l2(0.0005)),
         Dropout(0.3),
-        Dense(64, activation="relu"),
+
+        Dense(64, activation="relu",
+              kernel_regularizer=regularizers.l2(0.0005)),
         Dropout(0.3),
+
+        Dense(32, activation="relu"),
+        Dropout(0.2),
+
         Dense(1, activation="sigmoid")
     ])
 
     if optimizer_name == "adam":
-        optimizer = Adam(learning_rate=0.001)
+        optimizer = Adam(learning_rate=0.0005)
     elif optimizer_name == "sgd":
         optimizer = SGD(learning_rate=0.01, momentum=0.9)
     elif optimizer_name == "rmsprop":
-        optimizer = RMSprop(learning_rate=0.001)
+        optimizer = RMSprop(learning_rate=0.0005)
     else:
         optimizer = Adam()
 
@@ -173,19 +201,24 @@ for opt in optimizers:
 
     model = build_model(X_train.shape[1], optimizer_name=opt)
 
+    # Save model architecture
+    with open(os.path.join(MODEL_DIR, f"fake_news_model_summary_{opt}.txt"), "w", encoding="utf-8") as f:
+        model.summary(print_fn=lambda x: f.write(x + "\n"))
+
     history = model.fit(
         X_train,
         y_train,
         validation_data=(X_test, y_test),
-        epochs=20,
+        epochs=25,  # 🔥 increased
         batch_size=32,
         callbacks=[early_stop],
+        class_weight=class_weights,  # 🔥 important
         verbose=1
     )
 
     history_dict[opt] = history.history
 
-    # Evaluation
+    # ================= Evaluation =================
     y_pred_prob = model.predict(X_test)
     y_pred = (y_pred_prob > 0.5).astype(int)
 
@@ -195,19 +228,33 @@ for opt in optimizers:
     print("\nClassification Report:")
     print(classification_report(y_test, y_pred))
 
-    # Save Confusion Matrix
+    # ================= Confusion Matrix =================
     cm = confusion_matrix(y_test, y_pred)
-    np.save(os.path.join(MODEL_DIR, f"fake_news_cm_{opt}.npy"), cm)
 
-    # Save ROC Data
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=True)
+
+    plt.title(f"Confusion Matrix ({opt.upper()})")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+
+    plt.savefig(os.path.join(MODEL_DIR, f"fake_news_cm_{opt}.png"))
+    plt.close()
+
+    # ================= Metrics CSV =================
+    report = classification_report(y_test, y_pred, output_dict=True)
+    metrics_df = pd.DataFrame(report).transpose()
+    metrics_df.to_csv(os.path.join(MODEL_DIR, f"fake_news_metrics_{opt}.csv"))
+
+    # ================= ROC =================
     fpr, tpr, _ = roc_curve(y_test, y_pred_prob)
     np.save(os.path.join(MODEL_DIR, f"fake_news_fpr_{opt}.npy"), fpr)
     np.save(os.path.join(MODEL_DIR, f"fake_news_tpr_{opt}.npy"), tpr)
 
-    # Save Model
+    # ================= Save Model =================
     model.save(os.path.join(MODEL_DIR, f"fake_news_nn_{opt}.h5"))
 
-    # Store for proof CSV
+    # ================= Store Results =================
     results_list.append({
         "optimizer": opt.upper(),
         "best_train_accuracy": max(history.history["accuracy"]),
@@ -218,13 +265,9 @@ for opt in optimizers:
 # ======================================================
 # Save Proof Files
 # ======================================================
-
 results_df = pd.DataFrame(results_list)
-
-# Save CSV (for Streamlit display)
 results_df.to_csv(os.path.join(MODEL_DIR, "fake_news_training_results.csv"), index=False)
 
-# Save PKL (optional)
 with open(os.path.join(MODEL_DIR, "fake_news_history.pkl"), "wb") as f:
     pickle.dump(history_dict, f)
 
@@ -242,4 +285,3 @@ print(f"\nBest Optimizer: {best_model['optimizer']} "
       f"({best_model['test_accuracy']*100:.2f}%)")
 
 print("\nAll models trained and saved successfully!")
-
