@@ -1,1 +1,1 @@
-# Multi-Modal-Integrity-Agent-for-Misinformation-and-Content-Manipulation-Detection.
+# Multi-Modal-Integrity-Agent-for-Misinformation-and-Content-Manipulation-Detection
