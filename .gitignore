@@ -1,9 +1,7 @@
 venv/
-data/
-saved_models/
+.venv/
 __pycache__/
-*.pt
-*.pth
-*.h5
-*.pkl
-*.wav
+*.pyc
+.env
+.git/
+.DS_Store
